@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS batches (
     original_count   INTEGER NOT NULL DEFAULT 0,
     zip_path         TEXT,
     error            TEXT,
+    archive_status   TEXT,                     -- NULL / archiving / archived / failed
+    archive_error    TEXT,
+    archived_at      TEXT,
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     finished_at      TEXT
 );
@@ -58,6 +61,35 @@ CREATE TABLE IF NOT EXISTS batch_files (
 
 CREATE INDEX IF NOT EXISTS idx_batch_files_sop ON batch_files(sop_uid);
 CREATE INDEX IF NOT EXISTS idx_instances_sha  ON instances(sha256);
+
+-- 整理（archive）后的重建依据。
+-- archive_jobs 有记录即表示重建依据已完整持久化（整理的提交点）；
+-- 只有在此之后才允许删除原 ZIP，下载时改为按需重建。
+CREATE TABLE IF NOT EXISTS archive_jobs (
+    batch_id         TEXT PRIMARY KEY REFERENCES batches(id),
+    download_name    TEXT NOT NULL,             -- 下载文件名（与原包一致）
+    manifest_name    TEXT NOT NULL,             -- 原 manifest.csv 的成员名
+    manifest_sha256  TEXT NOT NULL,
+    manifest_size    INTEGER NOT NULL,
+    entry_count      INTEGER NOT NULL,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS archive_entries (
+    batch_id       TEXT NOT NULL
+                   REFERENCES archive_jobs(batch_id) ON DELETE CASCADE,
+    seq            INTEGER NOT NULL,            -- 原 ZIP 中的成员顺序
+    member_name    TEXT NOT NULL,               -- 原 ZIP 成员名
+    object_path    TEXT NOT NULL DEFAULT '',    -- 共享对象相对路径（manifest 为空）
+    size           INTEGER NOT NULL,
+    sha256         TEXT NOT NULL,
+    compress_type  INTEGER NOT NULL,
+    date_time      TEXT NOT NULL,               -- YYYY-MM-DDTHH:MM:SS
+    external_attr  INTEGER NOT NULL,
+    create_system  INTEGER NOT NULL,
+    PRIMARY KEY (batch_id, seq),
+    UNIQUE (batch_id, member_name)
+);
 """
 
 
@@ -88,11 +120,33 @@ def immediate_tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         conn.execute("COMMIT")
 
 
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """对既有数据库做向前兼容的增量迁移（幂等）。"""
+    batch_cols = _column_names(conn, "batches")
+    if "archive_status" not in batch_cols:
+        conn.execute("ALTER TABLE batches ADD COLUMN archive_status TEXT")
+    if "archive_error" not in batch_cols:
+        conn.execute("ALTER TABLE batches ADD COLUMN archive_error TEXT")
+    if "archived_at" not in batch_cols:
+        conn.execute("ALTER TABLE batches ADD COLUMN archived_at TEXT")
+    # 兼容早期数据库：有重建依据就视为已整理
+    conn.execute(
+        "UPDATE batches SET archive_status='archived' "
+        "WHERE status='ready' AND archive_status IS NULL "
+        "AND id IN (SELECT batch_id FROM archive_jobs)"
+    )
+
+
 def init_db() -> None:
     config.ensure_dirs()
     conn = get_db()
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
     finally:
         conn.close()
 

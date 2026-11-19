@@ -10,7 +10,8 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from . import config, dicom_proc
+from . import archive, config, dicom_proc
+from .archive import ArchiveError
 from .db import get_db, immediate_tx
 
 
@@ -185,6 +186,122 @@ def get_batch(batch_id: str) -> sqlite3.Row | None:
         ).fetchone()
     finally:
         conn.close()
+
+
+def download_name(batch_id: str) -> str:
+    """下载文件名；整理后使用持久化的原名，保证与原包一致。"""
+    job = archive.get_archive_job(batch_id)
+    if job is not None:
+        return job["download_name"]
+    return f"batch_{batch_id}.zip"
+
+
+def is_archived(batch_id: str) -> bool:
+    return archive.get_archive_job(batch_id) is not None
+
+
+def get_archive_job(batch_id: str):
+    return archive.get_archive_job(batch_id)
+
+
+def _set_archive_state(batch_id: str, status: str, error: str | None = None,
+                       clear_zip_path: bool = False) -> None:
+    conn = get_db()
+    try:
+        with immediate_tx(conn):
+            if clear_zip_path:
+                conn.execute(
+                    "UPDATE batches SET archive_status=?, archive_error=?, "
+                    "archived_at=datetime('now'), zip_path=NULL WHERE id=?",
+                    (status, error, batch_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE batches SET archive_status=?, archive_error=? WHERE id=?",
+                    (status, error, batch_id),
+                )
+    finally:
+        conn.close()
+
+
+def reclaim_archived_zip(batch_id: str, zip_path: Path) -> None:
+    """已有重建依据但残留原 ZIP（如删 ZIP 前中断）时，安全地删掉它。"""
+    try:
+        zip_path.unlink(missing_ok=True)
+        archive.fsync_dir(zip_path.parent)
+    except OSError:
+        return
+    _set_archive_state(batch_id, "archived", clear_zip_path=True)
+
+
+def archive_batch(batch_id: str) -> None:
+    """整理已发布批次：核对共享对象与原 ZIP，持久化依据后再删除旧 ZIP。
+
+    - 核对/保存失败时原 ZIP 保留，状态记为 failed，可重试；
+    - 依据提交（数据库事务）后才删 ZIP，故中断重启后下载与重试都可用；
+    - 重复调用是幂等的；同批次整理由文件锁跨进程串行化。
+    """
+    batch = get_batch(batch_id)
+    if batch is None:
+        raise BatchError("批次不存在")
+    if batch["status"] != "ready":
+        raise BatchError("只有已发布的批次才能整理")
+
+    with archive.batch_lock(batch_id):
+        # 加锁后重新读取，避免另一个进程已完成整理时重复执行
+        batch = get_batch(batch_id)
+        if batch is None:
+            raise BatchError("批次不存在")
+        if archive.get_archive_job(batch_id) is not None:
+            if batch["zip_path"]:
+                reclaim_archived_zip(batch_id, Path(batch["zip_path"]))
+            else:
+                _set_archive_state(batch_id, "archived")
+            return
+        zip_path = Path(batch["zip_path"]) if batch["zip_path"] else None
+        if zip_path is None or not zip_path.exists():
+            _set_archive_state(batch_id, "failed", "原 ZIP 缺失，无法核对整理")
+            raise ArchiveError("原 ZIP 缺失，无法核对整理")
+
+        _set_archive_state(batch_id, "archiving")
+        try:
+            archive.verify_and_persist(batch_id, zip_path, download_name(batch_id))
+        except Exception as exc:  # noqa: BLE001
+            _set_archive_state(batch_id, "failed", f"整理失败: {exc}")
+            raise
+        # 依据已持久化，此时删除旧 ZIP 才是安全的
+        try:
+            zip_path.unlink(missing_ok=True)
+            archive.fsync_dir(zip_path.parent)
+        except OSError as exc:
+            _set_archive_state(
+                batch_id, "archived", f"整理完成，但旧 ZIP 删除失败: {exc}"
+            )
+            return
+        _set_archive_state(batch_id, "archived", clear_zip_path=True)
+
+
+def open_download(batch_id: str) -> tuple[Path, str, bool]:
+    """返回 (可发送的文件路径, 下载文件名, 是否临时文件)。
+
+    未整理时直接发送原 ZIP；已整理时按重建依据流式重新打包。
+    重建失败会抛 ArchiveError，调用方据此返回明确错误（绝不返回半包）。
+    """
+    batch = get_batch(batch_id)
+    if batch is None:
+        raise BatchError("批次不存在")
+    if batch["status"] != "ready":
+        raise BatchError("批次尚未处理成功，无可下载文件包")
+
+    name = download_name(batch_id)
+    zip_path = Path(batch["zip_path"]) if batch["zip_path"] else None
+    if zip_path is not None and zip_path.exists():
+        return zip_path, name, False
+
+    if archive.get_archive_job(batch_id) is None:
+        raise ArchiveError("文件包缺失，且无重建依据")
+    archive.cleanup_stale_rebuilds()
+    return archive.build_temp_zip(batch_id), name, True
 
 
 def list_batches(limit: int = 50) -> list[sqlite3.Row]:

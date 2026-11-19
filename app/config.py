@@ -41,6 +41,11 @@ class _Paths:
     def batches_dir(self) -> Path:
         return self.data_dir / "batches"
 
+    @property
+    def archives_dir(self) -> Path:
+        """整理后保存重建依据（原 manifest.csv 等）的目录。"""
+        return self.data_dir / "archives"
+
 
 _paths = _Paths()
 # 向后兼容的模块级名称（首次导入时快照；运行时请使用 get_* 函数）
@@ -65,6 +70,10 @@ def get_upload_tmp_dir() -> Path:
 
 def get_batches_dir() -> Path:
     return _paths.batches_dir
+
+
+def get_archives_dir() -> Path:
+    return _paths.archives_dir
 
 
 def get_uid_prefix() -> str:
@@ -97,5 +106,6 @@ def ensure_dirs() -> None:
         _paths.objects_dir,
         _paths.upload_tmp_dir,
         _paths.batches_dir,
+        _paths.archives_dir,
     ):
         path.mkdir(parents=True, exist_ok=True)

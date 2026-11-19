@@ -8,6 +8,39 @@
   {% if batch.error %}<div class="flash error">{{ batch.error }}</div>{% endif %}
   {% if batch.status == 'ready' %}
     <a class="btn" href="{{ url_for('download', batch_id=batch.id) }}">下载整批处理结果（zip，含 manifest.csv）</a>
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid #e1e6ee;">
+      <p style="margin:0 0 8px;">
+        整理状态：
+        {% if archive %}
+          <span class="status-ready">已整理</span>
+          <span class="muted">（{{ archive.created_at }}，{{ archive.entry_count }} 个成员，下载时按需重建，原包已删除）</span>
+        {% elif archive_locked or batch.archive_status == 'archiving' %}
+          <span class="status-processing">整理中</span>
+        {% elif batch.archive_status == 'failed' %}
+          <span class="status-failed">整理失败</span>
+        {% else %}
+          <span class="muted">未整理（原 ZIP 仍保留）</span>
+        {% endif %}
+      </p>
+      {% if batch.archive_error %}<div class="flash error">{{ batch.archive_error }}</div>{% endif %}
+      {% if archive %}
+        <p class="muted" style="margin:0;">
+          重建依据与原 manifest.csv 已持久保存；从原地址下载时按需重新打包，
+          下载文件名、包内成员名与成员字节均与原包一致。
+        </p>
+      {% else %}
+        <form method="post" action="{{ url_for('archive_batch', batch_id=batch.id) }}">
+          <button class="btn" type="submit"
+                  {% if archive_locked or batch.archive_status == 'archiving' %}disabled{% endif %}>
+            {% if batch.archive_status == 'failed' %}重试整理{% else %}整理批次（核对后删除旧 ZIP）{% endif %}
+          </button>
+        </form>
+        <p class="muted" style="margin:8px 0 0;">
+          将逐个核对共享对象与原 ZIP 中的影像字节，持久保存重建依据与原 manifest.csv 后
+          才删除旧 ZIP；核对或保存失败时原包保留，可随时重试。整理期间原地址仍可下载。
+        </p>
+      {% endif %}
+    </div>
   {% else %}
     <button class="btn" disabled>处理未成功，不提供下载（无半批产物）</button>
     {% if batch.status == 'processing' %}

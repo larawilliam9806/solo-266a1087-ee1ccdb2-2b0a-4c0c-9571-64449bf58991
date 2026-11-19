@@ -49,6 +49,7 @@ app/
   db.py            SQLite 连接、WAL、建表、中断恢复
   identifiers.py   确定性 UID / PatientID 派生
   dicom_proc.py    DICOM 校验、标识收集、映射、匿名化重标识、对象落盘
+  archive.py       批次整理（核对/持久化重建依据）与按需流式重建
   services.py      批次编排、zip 原子打包、CSV 清单、状态机
   web.py           Flask 路由与应用工厂
   wsgi.py          gunicorn 入口
@@ -75,7 +76,8 @@ docker compose up --build
 - `dicom.db`（SQLite，WAL 模式）
 - `objects/`（内容寻址的处理后 DICOM）
 - `tmp/`（上传暂存，按批次隔离，结束即清理）
-- `batches/`（最终 zip，原子写入）
+- `batches/`（未整理批次的最终 zip，原子写入；整理后删除）
+- `archives/`（整理后持久保存的重建依据与原 `manifest.csv`）
 
 ## 本地开发（无 Docker）
 
@@ -86,7 +88,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 # 生成含跨文件引用的合成样例
 python samples/generate_samples.py
 
-# 运行测试（15 个，含多进程并发）
+# 运行测试（含多进程并发、整理/重建）
 pytest -q
 
 # 本地启动
@@ -109,12 +111,35 @@ DICOM_DATA_DIR=./data python -m flask --app app.wsgi:app run --debug
 | --- | --- | --- |
 | GET | `/` | 上传表单与批次列表 |
 | POST | `/upload` | multipart 多文件上传并同步处理，重定向到批次详情 |
-| GET | `/batches/<id>` | 批次状态、错误信息、文件清单 |
-| GET | `/batches/<id>/download` | 下载整批 zip（仅 `ready` 可用，否则 409） |
+| GET | `/batches/<id>` | 批次状态、错误信息、文件清单、整理状态 |
+| POST | `/batches/<id>/archive` | 整理批次：核对后持久化重建依据并删除旧 ZIP |
+| GET | `/batches/<id>/download` | 下载整批 zip（仅 `ready` 可用，否则 409；整理后按需重建） |
 | GET | `/healthz` | 健康检查 |
 
 下载的 zip 内含处理后的 DICOM（以新 SOP UID 命名）与 `manifest.csv`，
 清单列出每个文件的原/新 PatientID、三级 UID 映射及原文件 SHA-256，供数据湖关联。
+
+## 批次整理与按需重建
+
+批次详情页提供“整理批次”按钮，用于回收共享对象之外重复占用的 zip 空间：
+
+1. **逐个核对**：把原 ZIP 中每个成员流式读出，与共享对象存储中的对应文件
+   **逐字节比对**（同时校验大小与 SHA-256），并核对原 `manifest.csv`。
+2. **持久保存依据**：成员顺序、成员名、压缩方式、时间戳、权限等元数据入库
+   （`archive_jobs` / `archive_entries`），原 `manifest.csv` 的**原始字节**写入
+   `archives/<batch_id>/manifest.csv`。数据库提交是整理的提交点。
+3. **提交后才删除旧 ZIP**：核对或保存任何一步失败，原包一律保留、状态记为
+   `failed` 并明确报错，可直接重试。
+4. **整理期间可下载**：整理不持有下载路径上的锁，原地址始终可下载；整理由
+   每批次 `flock` 串行化，进程崩溃后锁自动释放，重启后可继续重试。
+5. **按需重建**：整理后从原地址下载时按依据重新打包，**下载文件名、包内成员名、
+   成员顺序、时间戳、压缩方式与每个成员的字节都与原包一致**。
+6. **明确失败、不返回半包**：重建先写临时文件并流式校验每个对象的大小与
+   SHA-256，任何对象缺失、内容变化或打包失败都会返回 409 与具体原因，临时文件
+   被删除，绝不会返回半包。
+7. **常量内存**：核对与重建均以固定大小分块流式处理，不把整包载入内存。
+8. **中断可恢复**：重启时自动清理崩溃遗留的 `archiving` 标记（可重试），并对
+   “依据已提交但旧 ZIP 未删掉”的批次安全补删原包；下载与整理都不会因此丢失。
 
 ## 合成样例说明
 

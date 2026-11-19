@@ -1,0 +1,26 @@
+services:
+  dicom-batch:
+    build: .
+    image: dicom-batch-processor:latest
+    container_name: dicom-batch-processor
+    ports:
+      - "8000:8000"
+    environment:
+      # 生产部署必须替换为机构合法的 DICOM UID 组织前缀（<=30 字符）
+      DICOM_UID_PREFIX: "1.2.826.0.1.3680043.10.9999"
+      DICOM_DATA_DIR: "/data"
+      MAX_CONTENT_LENGTH: "2147483648"
+      SQLITE_BUSY_TIMEOUT_MS: "30000"
+      FLASK_SECRET_KEY: "change-this-in-production"
+    volumes:
+      - dicom_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  dicom_data:

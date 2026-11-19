@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+# 运行时数据目录（与仓库自带的合成样例 samples/data 区分）
+/data/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store

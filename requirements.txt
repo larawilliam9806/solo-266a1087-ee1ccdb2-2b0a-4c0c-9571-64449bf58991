@@ -1,0 +1,4 @@
+Flask==3.0.3
+pydicom==2.4.4
+numpy==1.26.4
+gunicorn==22.0.0

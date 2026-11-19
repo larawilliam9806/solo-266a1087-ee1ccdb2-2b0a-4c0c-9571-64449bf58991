@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="card">
+  <h2 style="margin-top:0;">上传新批次</h2>
+  <p class="muted">
+    仅接受<b>未压缩传输语法</b>的 DICOM 文件，可多选批量上传。处理规则：
+    清空 PatientName、替换 PatientID；Study/Series/SOP 三类 UID 及全部嵌套引用统一换号；
+    SOP Class UID、Transfer Syntax UID、像素数据保持原样。同 UID 字节冲突将整批拒绝。
+  </p>
+  <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+    <p><input type="file" name="dicom_files" webkitdirectory multiple required></p>
+    <p class="muted">可选择文件夹或多选文件；未选择目录时直接多选文件即可。</p>
+    <p><input type="file" name="dicom_files" multiple required style="margin-bottom:14px;"></p>
+    <button class="btn" type="submit">上传并处理整批</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2 style="margin-top:0;">批次列表</h2>
+  {% if batches %}
+  <table>
+    <thead><tr>
+      <th>批次 ID</th><th>状态</th><th>文件数</th><th>创建时间</th><th>完成时间</th><th>操作</th>
+    </tr></thead>
+    <tbody>
+    {% for b in batches %}
+      <tr>
+        <td><a href="{{ url_for('batch_detail', batch_id=b.id) }}"><code>{{ b.id }}</code></a></td>
+        <td class="status-{{ b.status }}">{{ b.status }}</td>
+        <td>{{ b.original_count }}</td>
+        <td>{{ b.created_at }}</td>
+        <td>{{ b.finished_at or '—' }}</td>
+        <td>
+          {% if b.status == 'ready' %}
+            <a class="btn" href="{{ url_for('download', batch_id=b.id) }}">下载 zip</a>
+          {% else %}
+            <button class="btn" disabled>不可下载</button>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">暂无批次。</p>
+  {% endif %}
+</section>
+{% endblock %}
